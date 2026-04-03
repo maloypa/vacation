@@ -174,20 +174,26 @@
             background: #fee2e2;
             color: #c2412c;
         }
-        .stats-section {
+        .stats-wrapper {
             background: #f8fafc;
             border-top: 1px solid #e2edf2;
             padding: 1.2rem 2rem;
             display: flex;
             flex-wrap: wrap;
+            gap: 32px;
             justify-content: space-between;
-            align-items: center;
-            gap: 16px;
+        }
+        .stats-block {
+            flex: 1;
+            min-width: 240px;
         }
         .stats-title {
             font-weight: 600;
             color: #1e466e;
             font-size: 0.9rem;
+            margin-bottom: 12px;
+            border-left: 3px solid #1e466e;
+            padding-left: 10px;
         }
         .stats-badges {
             display: flex;
@@ -210,6 +216,7 @@
         .empty-stats {
             color: #7f8c8d;
             font-style: italic;
+            padding: 6px 0;
         }
         .footer-note {
             background: #fef9e6;
@@ -222,6 +229,7 @@
         @media (max-width: 780px) {
             .admin-panel { flex-direction: column; }
             .card { width: 100%; }
+            .stats-wrapper { flex-direction: column; gap: 20px; }
         }
         .toast-msg {
             position: fixed;
@@ -284,9 +292,15 @@
         </table>
     </div>
 
-    <div class="stats-section">
-        <div class="stats-title">📊 Кто сколько смен забрал (максимум 10 на человека):</div>
-        <div id="statsContainer" class="stats-badges"></div>
+    <div class="stats-wrapper">
+        <div class="stats-block">
+            <div class="stats-title">📊 Кто сколько смен забрал (максимум 10 на человека):</div>
+            <div id="replacementStatsContainer" class="stats-badges"></div>
+        </div>
+        <div class="stats-block">
+            <div class="stats-title">🏝️ Сколько дней в отпуске (всего):</div>
+            <div id="vacationDaysStatsContainer" class="stats-badges"></div>
+        </div>
     </div>
     <div class="footer-note">
         <span>✏️ Нельзя выбрать самого себя (сотрудник в отпуске не может заменять). Лимит замен — 10 смен на человека.</span>
@@ -302,8 +316,8 @@
     let replacementsMap = {};
 
     const REPLACEMENT_LIMIT = 10;
-    const STORAGE_VACATIONS = 'vacation_system_items_v3';
-    const STORAGE_REPLACEMENTS = 'vacation_system_replacements_v3';
+    const STORAGE_VACATIONS = 'vacation_system_items_v4';
+    const STORAGE_REPLACEMENTS = 'vacation_system_replacements_v4';
 
     // Исходные данные
     const DEFAULT_EMPLOYEES = [
@@ -397,7 +411,6 @@
         return count;
     }
 
-    // Проверка возможности назначения (с учётом исключения текущего ключа)
     function canAssignReplacement(employeeName, excludeKey = null) {
         let currentCount = getReplacementCount(employeeName);
         if (excludeKey && replacementsMap[excludeKey] === employeeName) {
@@ -413,7 +426,7 @@
             if (replacementsMap[key]) {
                 delete replacementsMap[key];
                 persistReplacements();
-                updateStatistics();
+                updateAllStats();
                 return true;
             }
             return true;
@@ -425,7 +438,7 @@
         }
         replacementsMap[key] = newReplacer;
         persistReplacements();
-        updateStatistics();
+        updateAllStats();
         return true;
     }
 
@@ -438,13 +451,12 @@
         if (confirm('Удалить все назначения замен? Статистика обнулится.')) {
             replacementsMap = {};
             persistReplacements();
-            updateStatistics();
+            updateAllStats();
             renderTable();
             showToast('Все замены удалены');
         }
     }
 
-    // Принудительное сохранение всех текущих значений из select (на случай, если автосохранение пропустило)
     function forceSaveAllReplacements() {
         const rows = document.querySelectorAll('#vacationTable tbody tr');
         let changed = false;
@@ -462,12 +474,10 @@
                         if (replacementsMap[key]) delete replacementsMap[key];
                         changed = true;
                     } else {
-                        // проверка лимита при сохранении
                         if (canAssignReplacement(selectedValue, key)) {
                             replacementsMap[key] = selectedValue;
                             changed = true;
                         } else {
-                            // восстанавливаем старое значение в select
                             select.value = currentStored;
                             showToast(`Лимит для "${selectedValue}" превышен, значение не сохранено`);
                         }
@@ -477,7 +487,7 @@
         }
         if (changed) {
             persistReplacements();
-            updateStatistics();
+            updateAllStats();
             showToast('Все замены сохранены');
         } else {
             showToast('Ничего не изменилось');
@@ -587,34 +597,68 @@
         });
     }
 
-    function updateStatistics() {
-        const statsDiv = document.getElementById('statsContainer');
-        if (!statsDiv) return;
+    // Статистика замен
+    function updateReplacementStats() {
+        const container = document.getElementById('replacementStatsContainer');
+        if (!container) return;
         const counter = new Map();
         for (let replacer of Object.values(replacementsMap)) {
             if (replacer && replacer !== "") {
                 counter.set(replacer, (counter.get(replacer) || 0) + 1);
             }
         }
-        statsDiv.innerHTML = '';
+        container.innerHTML = '';
         if (counter.size === 0) {
-            statsDiv.innerHTML = '<div class="empty-stats">Пока никто не назначен заменяющим. Выберите из списка.</div>';
+            container.innerHTML = '<div class="empty-stats">Пока никто не назначен заменяющим. Выберите из списка.</div>';
             return;
         }
         const sorted = Array.from(counter.entries()).sort((a,b) => b[1] - a[1]);
         for (let [name, count] of sorted) {
             const badge = document.createElement('div');
             badge.className = 'stat-badge';
-            let limitHint = count >= REPLACEMENT_LIMIT ? ' ⛔ лимит' : ` (макс. ${REPLACEMENT_LIMIT})`;
             badge.innerHTML = `👤 ${name} <span>${count}</span> ${declension(count)}${count >= REPLACEMENT_LIMIT ? ' ⛔ лимит' : ''}`;
-            statsDiv.appendChild(badge);
+            container.appendChild(badge);
         }
+    }
+
+    // Статистика дней отпуска
+    function updateVacationDaysStats() {
+        const container = document.getElementById('vacationDaysStatsContainer');
+        if (!container) return;
+        const vacationCounter = new Map();
+        for (let item of vacationItems) {
+            const emp = item.employee;
+            vacationCounter.set(emp, (vacationCounter.get(emp) || 0) + 1);
+        }
+        container.innerHTML = '';
+        if (vacationCounter.size === 0) {
+            container.innerHTML = '<div class="empty-stats">Нет данных об отпусках</div>';
+            return;
+        }
+        const sorted = Array.from(vacationCounter.entries()).sort((a,b) => b[1] - a[1]);
+        for (let [name, days] of sorted) {
+            const badge = document.createElement('div');
+            badge.className = 'stat-badge';
+            badge.innerHTML = `🏖️ ${name} <span>${days}</span> ${declensionDays(days)}`;
+            container.appendChild(badge);
+        }
+    }
+
+    function updateAllStats() {
+        updateReplacementStats();
+        updateVacationDaysStats();
     }
 
     function declension(n) {
         if (n % 10 === 1 && n % 100 !== 11) return 'смена';
         if ([2,3,4].includes(n % 10) && ![12,13,14].includes(n % 100)) return 'смены';
         return 'смен';
+    }
+
+    function declensionDays(n) {
+        if (n % 10 === 1 && n % 100 !== 11) return 'день';
+        if ([2,3,4].includes(n % 10) && ![12,13,14].includes(n % 100)) return 'дня';
+        return 'дней';
     }
 
     function showToast(msg) {
@@ -654,7 +698,6 @@
             emptyOption.textContent = '— не выбрано —';
             select.appendChild(emptyOption);
             
-            // Фильтруем: исключаем сотрудника, который в отпуске (item.employee)
             const availableEmployees = allEmployees.filter(emp => emp !== item.employee);
             availableEmployees.forEach(emp => {
                 const option = document.createElement('option');
@@ -698,7 +741,7 @@
         });
         
         updateEmployeeSelect();
-        updateStatistics();
+        updateAllStats();
     }
     
     function init() {
