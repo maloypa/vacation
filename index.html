@@ -1,0 +1,343 @@
+﻿<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Отпуска — онлайн с Firebase</title>
+    <style>
+        * { box-sizing: border-box; font-family: system-ui; }
+        body { background: #eef2f7; margin: 0; padding: 12px; }
+        .container { max-width: 1300px; margin: 0 auto; background: white; border-radius: 28px; overflow: hidden; }
+        .header { background: #1e466e; color: white; padding: 1rem; text-align: center; }
+        h1 { margin: 0; font-size: 1.5rem; }
+        .panel { background: #f9fbfd; padding: 1rem; display: flex; flex-wrap: wrap; gap: 12px; }
+        .card { background: white; border-radius: 20px; padding: 0.7rem 1rem; border: 1px solid #e2edf2; flex: 1; min-width: 180px; }
+        .input-group { display: flex; gap: 6px; flex-wrap: wrap; }
+        input, select, button { padding: 6px 12px; border-radius: 40px; border: 1px solid #cbdde6; }
+        button { background: #1e466e; color: white; border: none; cursor: pointer; }
+        .toolbar { padding: 0.7rem 1rem; display: flex; justify-content: flex-end; gap: 8px; border-bottom: 1px solid #e2edf2; }
+        .table-wrapper { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; min-width: 500px; }
+        th, td { padding: 8px; text-align: left; border-bottom: 1px solid #e2edf2; }
+        .month-separator td { background: #f1f6fa; font-weight: bold; }
+        .employee-badge { background: #eef2ff; padding: 3px 10px; border-radius: 40px; }
+        .replacement-select { width: 100%; min-width: 130px; }
+        .delete-btn { background: none; border: none; font-size: 1.1rem; cursor: pointer; }
+        .stats { background: #f8fafc; padding: 1rem; display: flex; gap: 20px; flex-wrap: wrap; }
+        .stat-badge { background: white; border-radius: 40px; padding: 2px 12px; border: 1px solid #dce5ec; }
+        .toast { position: fixed; bottom: 20px; right: 20px; background: #1e466e; color: white; padding: 6px 14px; border-radius: 40px; opacity: 0; transition: 0.2s; z-index: 1000; }
+    </style>
+    <!-- Firebase SDK -->
+    <script type="module">
+        // ========== ВСТАВЬТЕ СВОЙ КОНФИГ FIREBASE ==========
+    const firebaseConfig = {
+  apiKey: "AIzaSyDWjYm2IeTWIB-rWx_UH_6MmCw55wC_Ys0",
+  authDomain: "vacation-app-1ad85.firebaseapp.com",
+  projectId: "vacation-app-1ad85",
+  storageBucket: "vacation-app-1ad85.firebasestorage.app",
+  messagingSenderId: "808471034011",
+  appId: "1:808471034011:web:76871944470c462efeae3e",
+  measurementId: "G-K3CN2VP6E7"
+};
+        // =================================================
+
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/9.22.2/firebase-app.js';
+        import { getFirestore, collection, doc, addDoc, deleteDoc, setDoc, getDocs, writeBatch } from 'https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore.js';
+        import { onSnapshot } from 'https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore.js';
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        // Коллекции
+        const vacationsCol = collection(db, 'vacations');
+        const replacementsCol = collection(db, 'replacements');
+
+        // Локальное состояние (будет синхронизироваться через onSnapshot)
+        let vacationItems = [];    // массив { id, displayDate, employee, sortKey }
+        let replacements = {};     // { "дата_сотрудник": "заменяющий" }
+        const REPLACEMENT_LIMIT = 10;
+
+        // Вспомогательные функции
+        function normalizeDate(d) {
+            let parts = d.split('.');
+            if (parts.length !== 2) return null;
+            let day = parseInt(parts[0], 10), month = parseInt(parts[1], 10);
+            if (isNaN(day) || isNaN(month) || day < 1 || day > 31 || month < 1 || month > 12) return null;
+            return `${day.toString().padStart(2, '0')}.${month.toString().padStart(2, '0')}`;
+        }
+        function getDateValue(key) { 
+            let [d, m] = key.split('.'); 
+            return parseInt(m) * 100 + parseInt(d); 
+        }
+        function escapeHtml(s) { return s.replace(/[&<>]/g, function(m) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]; }); }
+        function toast(msg) { 
+            let t = document.getElementById('toastMsg'); 
+            t.textContent = msg; 
+            t.style.opacity = '1'; 
+            setTimeout(() => t.style.opacity = '0', 2000); 
+        }
+        function decl(n) { if (n % 10 === 1 && n % 100 !== 11) return 'смена'; if ([2, 3, 4].includes(n % 10) && ![12, 13, 14].includes(n % 100)) return 'смены'; return 'смен'; }
+        function declDays(n) { if (n % 10 === 1 && n % 100 !== 11) return 'день'; if ([2, 3, 4].includes(n % 10) && ![12, 13, 14].includes(n % 100)) return 'дня'; return 'дней'; }
+
+        // --- Real-time подписки ---
+        function subscribeToVacations() {
+            onSnapshot(vacationsCol, (snapshot) => {
+                const items = [];
+                snapshot.forEach(doc => {
+                    const data = doc.data();
+                    items.push({
+                        id: doc.id,
+                        displayDate: data.displayDate,
+                        employee: data.employee,
+                        sortKey: data.sortKey
+                    });
+                });
+                items.sort((a, b) => getDateValue(a.sortKey) - getDateValue(b.sortKey));
+                vacationItems = items;
+                renderAll();
+            });
+        }
+
+        function subscribeToReplacements() {
+            onSnapshot(replacementsCol, (snapshot) => {
+                const newReplacements = {};
+                snapshot.forEach(doc => {
+                    newReplacements[doc.id] = doc.data().replacer;
+                });
+                replacements = newReplacements;
+                renderAll(); // перерисовка после обновления замен
+            });
+        }
+
+        // --- Операции с данными (пишем напрямую в Firestore) ---
+        async function addEmployee(name, datesStr) {
+            const nameTrim = name.trim();
+            if (!nameTrim) { toast("Введите имя"); return false; }
+            const dateList = datesStr.split(',').map(s => s.trim()).filter(s => s);
+            let added = 0;
+            for (let d of dateList) {
+                const norm = normalizeDate(d);
+                if (!norm) { toast(`Неверный формат: ${d}`); continue; }
+                // Проверка дубликата (локально, т.к. vacationItems обновлён)
+                if (!vacationItems.some(i => i.employee === nameTrim && i.displayDate === norm)) {
+                    await addDoc(vacationsCol, {
+                        displayDate: norm,
+                        employee: nameTrim,
+                        sortKey: norm
+                    });
+                    added++;
+                }
+            }
+            if (added) {
+                toast(`Добавлено ${added} дней для ${nameTrim}`);
+                return true;
+            }
+            toast("Не добавлено ни одного дня (возможно, все уже есть)");
+            return false;
+        }
+
+        async function addVacationDay(employee, dateStr) {
+            const norm = normalizeDate(dateStr);
+            if (!norm) { toast("Формат: ДД.ММ"); return false; }
+            if (vacationItems.some(i => i.employee === employee && i.displayDate === norm)) {
+                toast("У сотрудника уже есть этот день");
+                return false;
+            }
+            await addDoc(vacationsCol, {
+                displayDate: norm,
+                employee: employee,
+                sortKey: norm
+            });
+            toast(`Добавлен день ${norm} для ${employee}`);
+            return true;
+        }
+
+        async function deleteVacation(id) {
+            const item = vacationItems.find(i => i.id === id);
+            if (!item) return;
+            // Удаляем связанную замену, если есть
+            const key = `${item.displayDate}_${item.employee}`;
+            if (replacements[key]) {
+                await deleteDoc(doc(replacementsCol, key));
+            }
+            await deleteDoc(doc(vacationsCol, id));
+            toast("День удалён");
+        }
+
+        async function setReplacement(date, employee, replacer) {
+            const key = `${date}_${employee}`;
+            const oldReplacer = replacements[key];
+            if (replacer === "") {
+                if (replacements[key]) {
+                    await deleteDoc(doc(replacementsCol, key));
+                }
+                return true;
+            }
+            // Проверка лимита
+            let count = 0;
+            for (let v of Object.values(replacements)) if (v === replacer) count++;
+            if (oldReplacer === replacer) count--; // если заменяем того же, не считаем повторно
+            if (count >= REPLACEMENT_LIMIT) {
+                toast(`Лимит! ${replacer} уже заменяет ${REPLACEMENT_LIMIT} смен.`);
+                return false;
+            }
+            await setDoc(doc(replacementsCol, key), { replacer });
+            return true;
+        }
+
+        async function clearAllReplacements() {
+            if (!confirm("Удалить все замены?")) return;
+            const batch = writeBatch(db);
+            const snapshot = await getDocs(replacementsCol);
+            snapshot.forEach(doc => batch.delete(doc.ref));
+            await batch.commit();
+            toast("Все замены удалены");
+        }
+
+        async function resetToDefault() {
+            if (!confirm("Сбросить к исходным данным? Все текущие отпуска и замены будут удалены.")) return;
+            // Удаляем все документы из vacations и replacements
+            const batch = writeBatch(db);
+            const vacSnap = await getDocs(vacationsCol);
+            vacSnap.forEach(doc => batch.delete(doc.ref));
+            const repSnap = await getDocs(replacementsCol);
+            repSnap.forEach(doc => batch.delete(doc.ref));
+            await batch.commit();
+
+            // Добавляем дефолтные записи
+            const defaultEmp = [
+                { name: "Марсель", dates: ["25.04","28.04","01.05","04.05","07.05"] },
+                { name: "Иван", dates: ["14.05","17.05","20.05","23.05","26.05"] },
+                { name: "Кирилл", dates: ["24.05","27.05","30.05","02.06","05.06"] },
+                { name: "Макс", dates: ["03.07","06.07","09.07","12.07"] }
+            ];
+            for (let emp of defaultEmp) {
+                for (let d of emp.dates) {
+                    const norm = normalizeDate(d);
+                    if (norm) {
+                        await addDoc(vacationsCol, {
+                            displayDate: norm,
+                            employee: emp.name,
+                            sortKey: norm
+                        });
+                    }
+                }
+            }
+            toast("Сброшено к начальному состоянию");
+        }
+
+        // --- Отрисовка интерфейса ---
+        function renderAll() {
+            const tbody = document.getElementById('tableBody');
+            tbody.innerHTML = '';
+            const allEmployees = [...new Set(vacationItems.map(i => i.employee))].sort();
+            let currentMonth = -1;
+            const monthNames = ["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
+            
+            for (let item of vacationItems) {
+                let month = parseInt(item.sortKey.split('.')[1], 10);
+                if (month !== currentMonth) {
+                    currentMonth = month;
+                    let row = tbody.insertRow();
+                    row.classList.add('month-separator');
+                    let cell = row.insertCell(0);
+                    cell.colSpan = 4;
+                    cell.textContent = `📅 ${monthNames[month-1]}`;
+                }
+                let row = tbody.insertRow();
+                row.insertCell(0).textContent = item.displayDate;
+                row.insertCell(1).innerHTML = `<span class="employee-badge">${escapeHtml(item.employee)}</span>`;
+                
+                let selectCell = row.insertCell(2);
+                let select = document.createElement('select');
+                select.className = 'replacement-select';
+                let opt = document.createElement('option');
+                opt.value = ''; opt.textContent = '— не выбрано —';
+                select.appendChild(opt);
+                let available = allEmployees.filter(e => e !== item.employee);
+                for (let emp of available) {
+                    let option = document.createElement('option');
+                    option.value = emp; option.textContent = emp;
+                    select.appendChild(option);
+                }
+                let key = `${item.displayDate}_${item.employee}`;
+                select.value = replacements[key] || '';
+                select.addEventListener('change', (e) => setReplacement(item.displayDate, item.employee, e.target.value));
+                selectCell.appendChild(select);
+                
+                let delCell = row.insertCell(3);
+                let delBtn = document.createElement('button');
+                delBtn.textContent = '❌';
+                delBtn.className = 'delete-btn';
+                delBtn.onclick = () => deleteVacation(item.id);
+                delCell.appendChild(delBtn);
+            }
+            
+            // Статистика замен
+            let replaceStats = {};
+            for (let v of Object.values(replacements)) replaceStats[v] = (replaceStats[v] || 0) + 1;
+            let rsDiv = document.getElementById('replaceStats');
+            rsDiv.innerHTML = '';
+            for (let [name, cnt] of Object.entries(replaceStats).sort((a,b)=>b[1]-a[1])) {
+                let div = document.createElement('div'); div.className = 'stat-badge';
+                div.innerHTML = `👤 ${name} <b>${cnt}</b> ${decl(cnt)}${cnt>=REPLACEMENT_LIMIT?' ⛔':''}`;
+                rsDiv.appendChild(div);
+            }
+            
+            // Статистика дней отпуска
+            let vacDays = {};
+            for (let i of vacationItems) vacDays[i.employee] = (vacDays[i.employee] || 0) + 1;
+            let vdDiv = document.getElementById('vacStats');
+            vdDiv.innerHTML = '';
+            for (let [name, days] of Object.entries(vacDays).sort((a,b)=>b[1]-a[1])) {
+                let div = document.createElement('div'); div.className = 'stat-badge';
+                div.innerHTML = `🏖️ ${name} <b>${days}</b> ${declDays(days)}`;
+                vdDiv.appendChild(div);
+            }
+            
+            // Обновить выпадающий список сотрудников
+            let empSelect = document.getElementById('empSelect');
+            empSelect.innerHTML = '';
+            for (let emp of allEmployees) {
+                let option = document.createElement('option'); option.value = emp; option.textContent = emp;
+                empSelect.appendChild(option);
+            }
+        }
+
+        // --- Инициализация и подключение событий ---
+        document.getElementById('addEmpBtn').onclick = async () => {
+            let name = document.getElementById('newName').value;
+            let dates = document.getElementById('newDates').value;
+            await addEmployee(name, dates);
+            document.getElementById('newName').value = '';
+            document.getElementById('newDates').value = '';
+        };
+        document.getElementById('addDateBtn').onclick = async () => {
+            let emp = document.getElementById('empSelect').value;
+            let date = document.getElementById('extraDate').value;
+            if (emp && date) await addVacationDay(emp, date);
+            document.getElementById('extraDate').value = '';
+        };
+        document.getElementById('resetBtn').onclick = resetToDefault;
+        document.getElementById('clearReplacementsBtn').onclick = clearAllReplacements;
+
+        // Запуск подписок
+        subscribeToVacations();
+        subscribeToReplacements();
+    </script>
+</head>
+<body>
+<div class="container">
+    <div class="header"><h1>📅 Отпуска на этот год (общая база — Firebase)</h1></div>
+    <div class="panel">
+        <div class="card"><b>➕ Новый сотрудник</b><div class="input-group"><input id="newName" placeholder="Имя"><input id="newDates" placeholder="01.05, 04.05"><button id="addEmpBtn">Добавить</button></div></div>
+        <div class="card"><b>📌 Добавить день отпуска</b><div class="input-group"><select id="empSelect"></select><input id="extraDate" placeholder="15.08"><button id="addDateBtn">+ день</button></div></div>
+        <div class="card"><b>🔄 Сброс</b><button id="resetBtn" style="background:#eef3f9; color:#1e466e;">Сбросить всё</button></div>
+    </div>
+    <div class="toolbar"><button id="clearReplacementsBtn">🗑 Очистить все замены</button></div>
+    <div class="table-wrapper"><table id="vacTable"><thead><tr><th>Дата</th><th>Сотрудник</th><th>Замена</th><th></th></tr></thead><tbody id="tableBody"></tbody></table></div>
+    <div class="stats"><div><b>🏆 Кто сколько замен (лимит 10)</b><div id="replaceStats"></div></div><div><b>🏝️ Дней отпуска</b><div id="vacStats"></div></div></div>
+</div>
+<div id="toastMsg" class="toast"></div>
+</body>
+</html>
